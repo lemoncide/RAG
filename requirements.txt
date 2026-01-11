@@ -1,0 +1,15 @@
+# Core Dependencies
+pypdf
+sentence-transformers
+faiss-cpu
+fastapi
+uvicorn
+python-multipart
+
+# Evaluation
+# ragas
+
+# Future/Optional
+# llama-index
+# haystack-ai
+# nemoguardrails
