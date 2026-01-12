@@ -13,10 +13,17 @@ class QueryRequest(BaseModel):
 # Pydantic model for the response
 # 定义响应体模型。它规定了系统返回给用户的数据格式。
 class DocumentResponse(BaseModel):
-    text: str # 检索到的原始句子
-    window: str # 包含上下文的窗口
+    text: str
+    window: str
     source: str
     page_number: int | None = None
+    
+    # Scores from different stages of the pipeline
+    distance: float | None = None        # Lower is better. From Dense (vector) Retriever.
+    bm25_score: float | None = None      # Higher is better. From Sparse (keyword) Retriever.
+    rerank_score: float | None = None    # Higher is better. From Reranker.
+    
+    is_reranked: bool | None = None      # Flag to indicate if the result came from the reranker.
 
 router = APIRouter()# 实例化 APIRouter
 

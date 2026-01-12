@@ -9,7 +9,9 @@ unstructured[pdf]
 unstructured-inference
 pi-heif
 pdf2image
+FlagEmbedding
 # poppler
+# Tesseract
 
 # Evaluation
 # ragas

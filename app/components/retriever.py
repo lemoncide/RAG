@@ -50,9 +50,18 @@ class DenseRetriever:
         query_embedding = self.model.encode([query]) # 用户的提问用同一个模型转化成query_embedding
         
         distances, indices = self.index.search(np.array(query_embedding, dtype=np.float32), top_k)
-        # 根据 FAISS 库的官方文档和设计，search 方法被规定为：执行搜索后，必须返回一个包含相似度得分以及index的元组。
 
-        results = [self.documents[i] for i in indices[0]]
+        results = []
+        if indices is not None and len(indices) > 0:
+            # 过滤掉无效的索引（-1是FAISS在找不到邻居时返回的值）
+            # 并创建一个包含文档和其距离的字典列表
+            for i, dist in zip(indices[0], distances[0]):
+                if i != -1:
+                    doc = self.documents[i].copy()  # 使用 .copy() 避免修改原始文档
+                    doc['distance'] = float(dist)
+                    results.append(doc)
+        
+        # FAISS返回的结果已经按距离排序，所以我们不需要重新排序
         return results
 
     def save_index(self, file_path: str):

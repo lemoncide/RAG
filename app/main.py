@@ -9,6 +9,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.core.pipeline import RAGPipeline
 from app.components.retriever import DenseRetriever
+from app.components.sparse_retriever import SparseRetriever
+from app.components.reranker import Reranker
 from app.api.router import router as api_router
 
 # A 'lifespan' function is best practice for loading models/resources
@@ -21,10 +23,11 @@ async def lifespan(app: FastAPI):
     print("--- Loading RAG pipeline and resources ---")
     
     # 1. Define paths
-    index_path = "faiss_index.bin"
+    faiss_index_path = "faiss_index.bin"
+    bm25_index_path = "bm25_index.pkl"
     documents_path = "documents.json"
     
-    # 2. Load the text chunks
+    # 2. Load the shared documents
     try:
         with open(documents_path, "r", encoding="utf-8") as f:
             documents = json.load(f)
@@ -34,25 +37,47 @@ async def lifespan(app: FastAPI):
         yield
         return
 
-    # 3. Initialize components
-    retriever = DenseRetriever(model_name='paraphrase-multilingual-mpnet-base-v2')
-    
-    # 4. Load the pre-built index 初始化检索器,加载模型，将文本转换为向量
+    # 3. Initialize Dense Retriever
     try:
-        retriever.load_index(index_path)
-        retriever.documents = documents # IMPORTANT: associate text with the index
-        #读取 FAISS 索引文件，并将刚才加载的文本块关联到检索器中。这样检索器在搜到向量 ID 后，能直接返回对应的文字。
+        dense_retriever = DenseRetriever(model_name='paraphrase-multilingual-mpnet-base-v2')
+        dense_retriever.load_index(faiss_index_path)
+        dense_retriever.documents = documents
     except Exception as e:
-        print(f"Error loading FAISS index: {e}")
-        print("Please ensure 'faiss_index.bin' exists and is valid.")
+        print(f"Error loading Dense Retriever: {e}")
+        print("Please ensure 'faiss_index.bin' and model exist and are valid.")
         app.state.pipeline = None
         yield
         return
 
-    # 5. Initialize the main RAG pipeline
-    # Reader and Preprocessor are not needed for serving, only for indexing
-    # 封装 Pipeline。将检索器装入 RAGPipeline 对象，并挂载到 app.state
-    app.state.pipeline = RAGPipeline(reader=None, preprocessor=None, retriever=retriever)
+    # 4. Initialize Sparse Retriever
+    try:
+        sparse_retriever = SparseRetriever()
+        sparse_retriever.load_index(bm25_index_path, documents)
+    except Exception as e:
+        print(f"Error loading Sparse Retriever: {e}")
+        print("Please ensure 'bm25_index.pkl' exists and is valid.")
+        app.state.pipeline = None
+        yield
+        return
+
+    # 5. Initialize the reranker (optional)
+    reranker = None
+    try:
+        reranker = Reranker()
+    except ImportError:
+        print("--- Reranker not available. Install 'FlagEmbedding' to enable it. ---")
+    except Exception as e:
+        print(f"--- Error initializing Reranker: {e} ---")
+        print("--- Proceeding without Reranker. ---")
+
+    # 6. Initialize the main RAG pipeline with both retrievers
+    app.state.pipeline = RAGPipeline(
+        reader=None, 
+        preprocessor=None, 
+        dense_retriever=dense_retriever,
+        sparse_retriever=sparse_retriever,
+        reranker=reranker
+    )
     
     print("--- RAG pipeline and resources loaded successfully ---")
     
