@@ -35,7 +35,7 @@ async def lifespan(app: FastAPI):
         return
 
     # 3. Initialize components
-    retriever = DenseRetriever(model_name='all-MiniLM-L6-v2')
+    retriever = DenseRetriever(model_name='paraphrase-multilingual-mpnet-base-v2')
     
     # 4. Load the pre-built index 初始化检索器,加载模型，将文本转换为向量
     try:

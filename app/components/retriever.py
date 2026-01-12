@@ -11,7 +11,7 @@ class DenseRetriever:
     This class handles embedding creation and similarity search, getting inspiration
     from 'rag-from-scratch' for understanding the core mechanics.
     """
-    def __init__(self, model_name: str = 'all-MiniLM-L6-v2'):
+    def __init__(self, model_name: str = 'paraphrase-multilingual-mpnet-base-v2'):
         print("Initializing SentenceTransformer model...")
         self.model = SentenceTransformer(model_name)
         self.index = None

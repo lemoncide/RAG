@@ -13,7 +13,8 @@ class QueryRequest(BaseModel):
 # Pydantic model for the response
 # 定义响应体模型。它规定了系统返回给用户的数据格式。
 class DocumentResponse(BaseModel):
-    text: str
+    text: str # 检索到的原始句子
+    window: str # 包含上下文的窗口
     source: str
     page_number: int | None = None
 

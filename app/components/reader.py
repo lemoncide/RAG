@@ -1,43 +1,70 @@
-from typing import List, Dict
-from pathlib import Path
-from pypdf import PdfReader
+import os
+import re
+from typing import List, Dict, Any
+from unstructured.partition.pdf import partition_pdf
+from app.components.cleaners import is_garbled
 
 class PDFReader:
     """
-    A component responsible for reading text content from PDF files.
-    
-    Inspired by RAGFlow's focus on quality document parsing.
+    A class to read PDF documents, partition them into structured elements,
+    and perform initial filtering.
     """
-    def __init__(self): # 读取器暂时不需要预加载模型或配置
-        pass
+    def __init__(self, input_dir: str):
+        self.input_dir = input_dir
 
-    def read(self, file_path: Path) -> List[Dict[str, str]]:
+    def read(self) -> List[Dict[str, Any]]:
         """
-        Reads a PDF file and extracts text from each page.
-        
-        Args:
-            file_path: The path to the PDF file.
-            
-        Returns:
-            A list of dictionaries, where each dictionary represents a page
-            with its number and content.
+        Reads all PDFs from the input directory, returning a list of structured documents.
+        Each document contains its source and a list of filtered, structured elements.
         """
-        if not file_path.exists() or not file_path.is_file():
-            raise FileNotFoundError(f"File not found: {file_path}")
-            
-        print(f"Reading PDF: {file_path.name}")
-        reader = PdfReader(file_path)
-        
-        documents = []
-        for i, page in enumerate(reader.pages):
-            content = page.extract_text()
-            if content: # Only add pages with text
-                documents.append({
-                    "page_number": i + 1,
-                    "content": content,
-                    "source": file_path.name
-                })
-        
-        print(f"Extracted {len(documents)} pages with text.")
-        return documents
+        structured_docs = []
+        for root, _, files in os.walk(self.input_dir):
+            for file in files:
+                if not file.endswith(".pdf"):
+                    continue
+                
+                file_path = os.path.join(root, file)
+                print(f"Processing document: {file_path}")
+                try:
+                    # Use hi_res strategy for better layout detection
+                    elements = partition_pdf(
+                        filename=file_path,
+                        languages=["chi_sim", "eng"],
+                        strategy="hi_res" 
+                    )
+                    
+                    excluded_categories = ["Header", "Footer", "Formula", "FigureCaption", "Table", "Image"]
+                    
+                    filtered_elements = []
+                    for element in elements:
+                        # Stop processing if a "References" or "Bibliography" title is found
+                        if element.category == "Title" and re.search(r'^\s*(references|bibliography)\b', str(element), re.IGNORECASE):
+                            print(f"References section found in {file}. Stopping processing for this document.")
+                            break
+                        
+                        if element.category in excluded_categories:
+                            continue
 
+                        # Per user feedback, add pre-filtering in the reader
+                        element_text = str(element).strip()
+                        if len(element_text) < 20 and element.category == "Text": # Filter short, isolated text snippets
+                            continue
+                        if is_garbled(element_text): # Pre-filter obviously garbled text
+                            continue
+
+                        filtered_elements.append({
+                            "text": element_text,
+                            "page_number": getattr(element.metadata, 'page_number', None),
+                            "category": element.category
+                        })
+
+                    structured_docs.append({
+                        "source": file,
+                        "elements": filtered_elements
+                    })
+                    print(f"Successfully processed {file} with {len(filtered_elements)} elements.")
+
+                except Exception as e:
+                    print(f"Error processing {file}: {e}")
+                    
+        return structured_docs

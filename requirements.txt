@@ -5,6 +5,11 @@ faiss-cpu
 fastapi
 uvicorn
 python-multipart
+unstructured[pdf]
+unstructured-inference
+pi-heif
+pdf2image
+# poppler
 
 # Evaluation
 # ragas
