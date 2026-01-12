@@ -1,6 +1,6 @@
 # RAG From Scratch Project
 
-This project aims to build a comprehensive Retrieval-Augmented Generation (RAG) system from the ground up, following best practices from leading open-source projects.
+This project aims to build a comprehensive Retrieval-Augmented Generation (RAG) system from the ground up
 
 ## Project Plan
 
