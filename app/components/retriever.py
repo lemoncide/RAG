@@ -3,6 +3,7 @@ from sentence_transformers import SentenceTransformer
 from typing import List, Dict
 import numpy as np
 
+#将文字变成向量，并负责快速找到最相关的内容。
 class DenseRetriever:
     """
     A component for creating and querying a dense vector index using FAISS.
@@ -34,7 +35,7 @@ class DenseRetriever:
         print(f"Embeddings created with dimension: {embedding_dim}")
         
         print("Building FAISS index...")
-        self.index = faiss.IndexFlatL2(embedding_dim)
+        self.index = faiss.IndexFlatL2(embedding_dim) # 创建基于欧式距离（L2）的索引
         self.index.add(np.array(embeddings, dtype=np.float32))
         print(f"FAISS index built. Total vectors in index: {self.index.ntotal}")
 
@@ -46,10 +47,11 @@ class DenseRetriever:
             raise RuntimeError("Index is not built. Please call 'build_index' first.")
             
         print(f"Retrieving top {top_k} documents for query: '{query}'")
-        query_embedding = self.model.encode([query])
+        query_embedding = self.model.encode([query]) # 用户的提问用同一个模型转化成query_embedding
         
         distances, indices = self.index.search(np.array(query_embedding, dtype=np.float32), top_k)
-        
+        # 根据 FAISS 库的官方文档和设计，search 方法被规定为：执行搜索后，必须返回一个包含相似度得分以及index的元组。
+
         results = [self.documents[i] for i in indices[0]]
         return results
 

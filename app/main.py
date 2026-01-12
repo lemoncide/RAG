@@ -1,6 +1,6 @@
 import json
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI #Web框架核心
 
 # Add project root to the Python path to allow absolute imports from app/
 import sys
@@ -37,10 +37,11 @@ async def lifespan(app: FastAPI):
     # 3. Initialize components
     retriever = DenseRetriever(model_name='all-MiniLM-L6-v2')
     
-    # 4. Load the pre-built index
+    # 4. Load the pre-built index 初始化检索器,加载模型，将文本转换为向量
     try:
         retriever.load_index(index_path)
         retriever.documents = documents # IMPORTANT: associate text with the index
+        #读取 FAISS 索引文件，并将刚才加载的文本块关联到检索器中。这样检索器在搜到向量 ID 后，能直接返回对应的文字。
     except Exception as e:
         print(f"Error loading FAISS index: {e}")
         print("Please ensure 'faiss_index.bin' exists and is valid.")
@@ -50,17 +51,18 @@ async def lifespan(app: FastAPI):
 
     # 5. Initialize the main RAG pipeline
     # Reader and Preprocessor are not needed for serving, only for indexing
+    # 封装 Pipeline。将检索器装入 RAGPipeline 对象，并挂载到 app.state
     app.state.pipeline = RAGPipeline(reader=None, preprocessor=None, retriever=retriever)
     
     print("--- RAG pipeline and resources loaded successfully ---")
     
-    yield
+    yield #分割线,其上方的代码在启动时运行，下方的在关闭时运行
     
-    # Clean up the models and release the resources
+    # Clean up the models and release the resources 服务器停止时清空 pipeline
     print("Cleaning up resources.")
     app.state.pipeline = None
 
-
+# 实例化 FastAPI
 app = FastAPI(
     title="RAG From Scratch API",
     description="An API for interacting with a custom RAG system.",
@@ -68,6 +70,7 @@ app = FastAPI(
 )
 
 @app.get("/", tags=["General"])
+# 告诉 FastAPI：当用户在浏览器访问根路径时，请执行下面的 read_root
 async def read_root():
     """A simple health check endpoint."""
     return {"status": "ok"}

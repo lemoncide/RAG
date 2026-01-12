@@ -8,7 +8,7 @@ class PDFReader:
     
     Inspired by RAGFlow's focus on quality document parsing.
     """
-    def __init__(self):
+    def __init__(self): # 读取器暂时不需要预加载模型或配置
         pass
 
     def read(self, file_path: Path) -> List[Dict[str, str]]:
