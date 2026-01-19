@@ -1,4 +1,16 @@
 import re
+from typing import Tuple, Dict, Any, List
+
+# Regex for academic paper metadata
+# Improved author regex: handles multiple authors, initials, "and", and variations
+# e.g., "A. Paolillo, J. Doe, and C. Smith" or "Paolillo, Antonio and Doe, John"
+AUTHOR_REGEX = re.compile(
+    r'^(?!\s*(?:abstract|introduction|doi|keywords)\s*:)(?:[A-Z][A-Za-z\'.`\s-]+\s?,\s?)+',
+    re.IGNORECASE
+)
+# DOI regex
+DOI_REGEX = re.compile(r'\b(10\.\d{4,9}/[-._;()/:A-Z0-9]+)\b', re.IGNORECASE)
+
 
 def is_formula(text: str) -> bool:
     """
@@ -37,6 +49,22 @@ def is_garbled(text: str) -> bool:
         return True
     return False
 
+def is_low_alphanum_ratio(text: str, threshold: float = 0.6) -> bool:
+    """
+    Checks if the ratio of alphanumeric characters to total characters is below a threshold.
+    Useful for filtering out noise or layout artifacts (e.g. "......" or "| | |").
+    """
+    if not text:
+        return True
+    alphanum_count = len(re.findall(r'[a-zA-Z0-9]', text))
+    ratio = alphanum_count / len(text)
+    return ratio < threshold
+
+def is_reference_section(text: str) -> bool:
+    """Detects if the text block is likely a reference list item."""
+    # Matches patterns like "[1] J. Smith..." or "(Smith et al., 2021)" at the start
+    return re.search(r'^\s*(\[\d+\]|\(\d{4}\b)', text) is not None
+
 def clean_text(text: str) -> str:
     """
     A robust helper function to clean raw text.
@@ -55,7 +83,7 @@ def clean_text(text: str) -> str:
     # Remove soft hyphens
     text = text.replace("\u00ad", "")
     
-    # Remove reference markers like [1], [12], [6, 7]
+    # Remove citation markers like [1], [12], [6, 7] within the text
     text = re.sub(r'\[\d+(,\s*\d+)*\]', ' ', text)
     # Remove reference markers like (Yokoi et al., 2015)
     text = re.sub(r'\([A-Za-z\s.,&]+et al\.,\s*\d{4}\)', ' ', text, flags=re.IGNORECASE)
@@ -68,3 +96,35 @@ def clean_text(text: str) -> str:
     text = clean_extra_whitespace(text)
     
     return text.strip()
+
+def extract_metadata_and_clean(text: str) -> Tuple[str, Dict[str, Any]]:
+    """
+    Extracts metadata (DOI, authors) from a text chunk, removes it,
+    and then cleans the remaining text.
+    
+    Returns a tuple of (cleaned_text, metadata_dict).
+    """
+    metadata = {}
+    
+    # 1. Extract DOI
+    doi_match = DOI_REGEX.search(text)
+    if doi_match:
+        metadata['doi'] = doi_match.group(1)
+        text = DOI_REGEX.sub('', text) # Remove from text
+
+    # 2. Extract Authors (run on the first few lines of a document typically)
+    # This regex is simplified and works best on headers.
+    author_match = AUTHOR_REGEX.search(text)
+    if author_match:
+        authors_str = author_match.group(0).strip()
+        # Clean up the matched string
+        authors_str = re.sub(r'\s+and\s+$', '', authors_str.replace('\n', ' ')).strip()
+        authors = [a.strip() for a in authors_str.split(',') if a.strip()]
+        if authors:
+            metadata['authors'] = authors
+            text = AUTHOR_REGEX.sub('', text) # Remove from text
+
+    # 3. Clean the remaining text
+    cleaned_text = clean_text(text)
+    
+    return cleaned_text, metadata

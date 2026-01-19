@@ -16,7 +16,9 @@ FlagEmbedding
 # Evaluation
 # ragas
 
-# Future/Optional
-# llama-index
+llama-index
+llama-index-vector-stores-faiss
+llama-index-embeddings-huggingface
+llama-index-llms-ollama
 # haystack-ai
 # nemoguardrails

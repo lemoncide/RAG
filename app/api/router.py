@@ -2,13 +2,23 @@ from fastapi import APIRouter, Request, HTTPException
 # APIRouter 用于创建模块化的路由；Request 用于在函数中获取全局应用状态（如我们存好的 pipeline）
 from pydantic import BaseModel
 # 用于定义数据模型，确保用户发送的数据格式是正确的
-from typing import List, Dict
+from typing import List, Dict, Optional, Any
 
 # Pydantic model for the query request body
 # 定义请求体模型。它规定了用户发过来的 JSON 必须长什么样。
 class QueryRequest(BaseModel):
     query: str
     top_k: int = 5
+    filters: Optional[Dict[str, Any]] = None # "filters" 字段是可选的，可以接受任意键值对
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "query": "机器人驾驶车辆竞赛",
+                "top_k": 5,
+                "filters": {}
+            }
+        }
 
 # Pydantic model for the response
 # 定义响应体模型。它规定了系统返回给用户的数据格式。
@@ -34,6 +44,7 @@ async def perform_query(request: Request, payload: QueryRequest):
     # QueryRequest：FastAPI 会自动解析用户发来的 JSON，并验证是否符合 QueryRequest 的定义
     """
     Accepts a query and returns the most relevant document chunks.
+    Can also accept an optional 'filters' dictionary for metadata filtering.
     """
     # 检查 app.state 里面有没有我们在 main.py 里塞进去的 pipeline
     if not hasattr(request.app.state, 'pipeline') or request.app.state.pipeline is None:
@@ -44,9 +55,12 @@ async def perform_query(request: Request, payload: QueryRequest):
     
     # Run the pipeline
     try:
-        # Pass top_k to the run method
-        # 调用 run 方法，传入用户的查询词和数量。results 将会是 retriever 找回来的文档块列表。
-        results = pipeline.run(query=payload.query, top_k=payload.top_k)
+        # Pass the query, top_k, and optional filters to the run method
+        results = pipeline.run(
+            query=payload.query, 
+            top_k=payload.top_k, 
+            filters=payload.filters
+        )
         return results
     except Exception as e:
         # Log the exception for debugging
