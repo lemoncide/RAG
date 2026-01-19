@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.components.reader import DocumentReader
 from app.components.preprocessor import SentenceWindowPreprocessor
+from app.components.sparse_retriever import SparseRetriever
 
 # LlamaIndex components
 from llama_index.core import VectorStoreIndex, StorageContext, Settings
@@ -116,6 +117,13 @@ def main():
     with open(documents_json_path, "w", encoding="utf-8") as f:
         json.dump(bm25_documents, f, ensure_ascii=False, indent=2)
     print(f"Saved {len(bm25_documents)} documents to {documents_json_path}")
+    
+    # 8. Build and Persist BM25 Index (New Step)
+    print("\n--- Building and Persisting BM25 Index ---")
+    sparse_retriever = SparseRetriever()
+    sparse_retriever.build_index(bm25_documents)
+    bm25_index_path = persist_dir / "bm25_index.pkl"
+    sparse_retriever.save_index(bm25_index_path)
 
     print("\n--- Index Building Complete! ---")
     print(f"LlamaIndex with FAISS store persisted to: {persist_dir}")

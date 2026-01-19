@@ -19,6 +19,9 @@ FlagEmbedding
 llama-index
 llama-index-vector-stores-faiss
 llama-index-embeddings-huggingface
-llama-index-llms-ollama
+llama-index-llms-openai
 # haystack-ai
 # nemoguardrails
+
+streamlit
+requests

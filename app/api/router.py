@@ -35,6 +35,11 @@ class DocumentResponse(BaseModel):
     
     is_reranked: bool | None = None      # Flag to indicate if the result came from the reranker.
 
+class ChatResponse(BaseModel):
+    query: str
+    answer: str
+    source_documents: List[DocumentResponse]
+
 router = APIRouter()# 实例化 APIRouter
 
 @router.post("/query", response_model=List[DocumentResponse])
@@ -66,3 +71,30 @@ async def perform_query(request: Request, payload: QueryRequest):
         # Log the exception for debugging
         print(f"Error during pipeline execution: {e}")
         raise HTTPException(status_code=500, detail=f"An error occurred during query processing.")
+
+@router.post("/chat", response_model=ChatResponse)
+async def perform_chat(request: Request, payload: QueryRequest):
+    """
+    Accepts a query, retrieves relevant documents, and uses the local LLM (LM Studio) to generate an answer.
+    """
+    if not hasattr(request.app.state, 'pipeline') or request.app.state.pipeline is None:
+        raise HTTPException(status_code=503, detail="RAG pipeline is not initialized.")
+    
+    pipeline = request.app.state.pipeline
+    
+    try:
+        # 1. Retrieve documents (reuse the existing logic)
+        retrieved_docs = pipeline.run(
+            query=payload.query, 
+            top_k=payload.top_k, 
+            filters=payload.filters
+        )
+        
+        # 2. Synthesize answer using the LLM
+        answer = pipeline.synthesize(payload.query, retrieved_docs)
+        
+        return ChatResponse(query=payload.query, answer=answer, source_documents=retrieved_docs)
+        
+    except Exception as e:
+        print(f"Error during chat processing: {e}")
+        raise HTTPException(status_code=500, detail=f"An error occurred during chat processing: {str(e)}")

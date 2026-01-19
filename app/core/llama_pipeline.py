@@ -1,9 +1,10 @@
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 import json
+import urllib.request
 
 # LlamaIndex components
-from llama_index.core import VectorStoreIndex, StorageContext, load_index_from_storage, Settings
+from llama_index.core import VectorStoreIndex, StorageContext, load_index_from_storage, Settings, PromptTemplate
 from llama_index.core.vector_stores import MetadataFilter, MetadataFilters, ExactMatchFilter
 from llama_index.vector_stores.faiss import FaissVectorStore
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
@@ -28,12 +29,16 @@ class LlamaIndexRAGPipeline:
         persist_dir: str = "./vector_store", 
         model_name: str = "paraphrase-multilingual-mpnet-base-v2",
         enable_hybrid: bool = True,
-        enable_reranking: bool = True
+        enable_reranking: bool = True,
+        llm_api_base: str = "http://127.0.0.1:1234/v1", # LM Studio default
+        llm_model_name: str = "local-model" # Name doesn't matter much for LM Studio
     ):
         self.persist_dir = Path(persist_dir)
         self.model_name = model_name
         self.enable_hybrid = enable_hybrid
         self.enable_reranking = enable_reranking
+        self.llm_api_base = llm_api_base
+        self.llm_model_name = llm_model_name
         self.sparse_retriever = None
         self.reranker = None
         self._load_resources()
@@ -51,7 +56,44 @@ class LlamaIndexRAGPipeline:
         # Initialize the embedding model
         print(f"Loading embedding model: {self.model_name}")
         Settings.embed_model = HuggingFaceEmbedding(model_name=self.model_name)
-        Settings.llm = None # Explicitly set to None as this pipeline should not use an LLM
+        
+        # Initialize LLM (LM Studio via OpenAI compatible API)
+        if self.llm_api_base:
+            print(f"Initializing LLM pointing to: {self.llm_api_base} (LM Studio)")
+            
+            # Auto-detect model name from LM Studio
+            try:
+                # Construct models endpoint (e.g., http://localhost:1234/v1/models)
+                models_url = f"{self.llm_api_base.rstrip('/')}/models"
+                with urllib.request.urlopen(models_url, timeout=3) as response:
+                    data = json.loads(response.read().decode())
+                    # OpenAI format: {"data": [{"id": "model-name", ...}]}
+                    if "data" in data and len(data["data"]) > 0:
+                        detected_model = data["data"][0]["id"]
+                        print(f"Automatically detected loaded model: {detected_model}")
+                        self.llm_model_name = detected_model
+            except Exception as e:
+                print(f"Warning: Could not auto-detect model name: {e}. Using default: {self.llm_model_name}")
+
+            try:
+                from llama_index.llms.openai import OpenAI
+                
+                # FIX: OpenAI 库会严格校验模型名称。
+                # 当连接本地 LM Studio 时，我们需要传入一个合法的 OpenAI 模型名称（如 gpt-3.5-turbo）
+                # 来绕过这个客户端校验。LM Studio 服务端会忽略这个参数，直接使用当前加载的模型。
+                client_model_name = "gpt-3.5-turbo" if "localhost" in self.llm_api_base or "127.0.0.1" in self.llm_api_base else self.llm_model_name
+                
+                Settings.llm = OpenAI(
+                    model=client_model_name,
+                    api_base=self.llm_api_base,
+                    api_key="lm-studio", # Dummy key required by client
+                    temperature=0.7
+                )
+            except ImportError:
+                print("Warning: 'llama-index-llms-openai' not found. LLM generation will be disabled.")
+                Settings.llm = None
+        else:
+            Settings.llm = None 
 
         # Load the index from the FAISS vector store on disk
         print(f"Loading index from: {self.persist_dir}")
@@ -86,31 +128,44 @@ class LlamaIndexRAGPipeline:
         """
         self.sparse_retriever = SparseRetriever()
         
-        # Try to load documents from JSON file first (faster)
-        documents_json_path = Path("documents.json")
+        # Paths
         documents_json_path = self.persist_dir / "documents.json"
+        bm25_index_path = self.persist_dir / "bm25_index.pkl"
+        
+        documents = []
+        
+        # 1. Load documents (Required for both index loading and rebuilding)
         if documents_json_path.exists():
-            print(f"Loading documents from {documents_json_path} for BM25...")
             try:
                 with open(documents_json_path, 'r', encoding='utf-8') as f:
                     documents = json.load(f)
                 print(f"Loaded {len(documents)} documents from JSON file.")
-                self.sparse_retriever.build_index(documents)
-                return
             except Exception as e:
                 print(f"Failed to load documents from JSON: {e}")
-                print("Falling back to extracting documents from LlamaIndex index...")
         
-        # Fallback: Extract documents from LlamaIndex index
-        print("Extracting documents from LlamaIndex index for BM25...")
-        documents = self._extract_documents_from_index()
-        if documents:
-            print(f"Extracted {len(documents)} documents from index.")
-            self.sparse_retriever.build_index(documents)
-        else:
+        # Fallback: Extract from LlamaIndex if JSON load failed
+        if not documents:
+            print("Extracting documents from LlamaIndex index for BM25...")
+            documents = self._extract_documents_from_index()
+            
+        if not documents:
             print("Warning: No documents found. BM25 retrieval will be disabled.")
             self.enable_hybrid = False
             self.sparse_retriever = None
+            return
+
+        # 2. Try to load pre-built BM25 index
+        if bm25_index_path.exists():
+            print(f"Loading pre-built BM25 index from {bm25_index_path}...")
+            try:
+                self.sparse_retriever.load_index(bm25_index_path, documents)
+                return
+            except Exception as e:
+                print(f"Failed to load pre-built BM25 index: {e}. Rebuilding...")
+
+        # 3. Build index from scratch (if pre-built missing or failed)
+        print("Building BM25 index from scratch...")
+        self.sparse_retriever.build_index(documents)
     
     def _extract_documents_from_index(self) -> List[Dict[str, Any]]:
         """
@@ -329,3 +384,36 @@ class LlamaIndexRAGPipeline:
         fused_list = [doc_map[doc_id] for doc_id in sorted_doc_ids]
         
         return fused_list
+
+    def synthesize(self, query: str, nodes: List[Dict[str, Any]]) -> str:
+        """
+        Synthesizes an answer using the LLM based on the retrieved nodes.
+        """
+        if not Settings.llm:
+            return "LLM is not configured. Please ensure LM Studio is running and 'llama-index-llms-openai' is installed."
+
+        print(f"Synthesizing answer for query: '{query}' using {len(nodes)} context nodes...")
+        
+        # Construct context string from the 'window' (rich context) of the nodes
+        context_str = "\n\n".join([f"Source: {n['source']}\nContent: {n['window']}" for n in nodes])
+        
+        # Define a simple QA prompt template
+        template_str = (
+            "Context information is below.\n"
+            "---------------------\n"
+            "{context_str}\n"
+            "---------------------\n"
+            "Given the context information and not prior knowledge, answer the query.\n"
+            "Query: {query_str}\n"
+            "Answer: "
+        )
+        prompt_tmpl = PromptTemplate(template_str)
+        
+        # Generate response
+        try:
+            fmt_prompt = prompt_tmpl.format(context_str=context_str, query_str=query)
+            response = Settings.llm.complete(fmt_prompt)
+            return str(response)
+        except Exception as e:
+            print(f"Error calling LLM: {e}")
+            return f"Error generating answer: {e}"
