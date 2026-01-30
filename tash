@@ -1,0 +1,15 @@
+[33m8134469[m[33m ([m[1;31morigin/main[m[33m)[m Delete data/embodia/智能驾驶时间线.vsdx
+[33m4b22c15[m Delete data/embodia/具身智能驾驶：概念、方法、现状与展望_沈甜雨.pdf
+[33maad29d6[m Delete data/embodia/具身智能驾驶.vsdx
+[33mab9f331[m Delete data/embodia/人形机器人智能驾驶综述[引用上标].docx
+[33mf773a7c[m Delete data/embodia/s10846-019-01130-x(1).pdf
+[33m07508f8[m Delete data/embodia/Toward_Autonomous_Driving_by_Musculoskeletal_Huma.pdf
+[33m6c6915c[m Delete data/embodia/Perception_and_control_strategies_for_driving_uti.pdf
+[33m21a3aa6[m Delete data/embodia/Journal of Field Robotics - 2017 - Paolillo - Aut.pdf
+[33m0f6dbe9[m 添加简单的前端显示和使用llmstudio的回答生成
+[33md4a59d2[m 更改为llamaindex的向量库
+[33mee26a3b[m docs:1.增加一个关键词寻回2.尝试更精准的清理
+[33mc1ce6a3[m docs:1.更改分段方式2.使用更准确的pdf读取方式
+[33mf62943a[m docs:change annotation
+[33m4849ec1[m docs:更改注释
+[33mb1e4468[m feat: Initial commit of basic RAG framework
