@@ -16,7 +16,7 @@ with st.sidebar:
     api_url = st.text_input("API URL", value="http://127.0.0.1:8000/api/chat/stream")
     
     # 检索参数
-    top_k = st.slider("Top K (检索数量)", min_value=1, max_value=10, value=5)
+    top_k = st.slider("Top K (检索数量)", min_value=1, max_value=10, value=3)
     
     st.divider()
     st.markdown("### 关于")

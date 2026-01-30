@@ -46,3 +46,4 @@ venv.bak/
 faiss_index.bin
 documents.json
 *.log
+.trae/

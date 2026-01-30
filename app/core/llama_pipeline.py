@@ -206,7 +206,7 @@ class LlamaIndexRAGPipeline:
             return []
 
 
-    def run(self, query: str, top_k: int = 5, filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    def run(self, query: str, top_k: int = 3, filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """
         执行增强版 RAG 管道查询。
         
@@ -220,7 +220,7 @@ class LlamaIndexRAGPipeline:
         
         参数:
             query: 用于向量搜索的语义查询字符串。
-            top_k: 返回的结果数量。默认为 5。
+            top_k: 返回的结果数量。默认为 3。
             filters: 要应用的元数据过滤器字典，例如 {"authors": "Paolillo"}。
         """
         print(f"正在运行增强管道，查询: '{query}'，top_k={top_k}，过滤器: {filters}")

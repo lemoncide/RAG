@@ -54,7 +54,7 @@ python scripts/build_index.py
 ### 3. 启动本地模型 (LM Studio)
 
 1.  打开 LM Studio。
-2.  加载一个模型（推荐 **Qwen-1.5-1.8B** 或 **Phi-3-mini** 以获得最佳速度，默认使用 Qwen-4B）。
+2.  加载一个模型（推荐 小型模型例如 **Phi-3-mini** 以获得最佳速度，默认使用 Qwen-4B）。
 3.  点击左侧 **Server** 图标。
 4.  点击 **Start Server**，保持默认端口 `1234`。
 
@@ -65,7 +65,7 @@ python scripts/build_index.py
 ```bash
 uvicorn app.main:app --reload
 ```
-
+- API 文档地址: http://127.0.0.1:8000/docs
 ### 5. 启动对话界面
 
 另开一个终端，启动 Streamlit 前端：
@@ -74,14 +74,36 @@ uvicorn app.main:app --reload
 streamlit run streamlit_app.py
 ```
 
-浏览器会自动打开 `http://localhost:8501`，你就可以开始对话了！
+浏览器将自动打开 http://localhost:8501。
 
-## 🔌 API 接口
+## 🔌 API 接口说明
+
+### 1. 对话接口 (RAG + LLM)
+
+- **Endpoint**: `POST /api/chat`
+- **描述**: 检索相关文档并生成回答。
+- **请求示例**:
+  ```json
+  {
+    "query": "机器人驾驶车辆竞赛是什么？",
+    "top_k": 5
+  }
+  ```
+
+### 2. 纯检索接口 (Retriever Only)
+
+- **Endpoint**: `POST /api/query`
+- **描述**: 仅返回相关的文档片段，不生成回答。适合作为 Agent 的工具调用。
+- **请求示例**:
+  ```json
+  {
+    "query": "机器人竞赛规则",
+    "top_k": 10
+  }
+  ```
 
 如果你想在其他程序中调用：
 
-*   **流式对话**: `POST /api/chat/stream` (推荐)
+*   **流式对话**: `POST /api/chat/stream` 
 *   **普通对话**: `POST /api/chat`
 *   **纯检索**: `POST /api/query` (只返回文档，不生成回答)
-
----

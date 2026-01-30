@@ -9,14 +9,14 @@ from typing import List, Dict, Optional, Any
 # 定义请求体模型。它规定了用户发过来的 JSON 必须长什么样。
 class QueryRequest(BaseModel):
     query: str
-    top_k: int = 5 # 恢复为 5，因为切分粒度变小了，需要更多块来覆盖上下文
+    top_k: int = 3 # 默认为 3，平衡上下文长度和推理速度
     filters: Optional[Dict[str, Any]] = None # "filters" 字段是可选的，可以接受任意键值对
 
     class Config:
         json_schema_extra = {
             "example": {
                 "query": "机器人驾驶车辆竞赛",
-                "top_k": 5,
+                "top_k": 3,
                 "filters": {}
             }
         }
