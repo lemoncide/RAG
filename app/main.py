@@ -21,7 +21,10 @@ async def lifespan(app: FastAPI):
     try:
         # Initialize the main RAG pipeline.
         # This class now handles its own resource loading internally.
-        app.state.pipeline = LlamaIndexRAGPipeline(persist_dir="./vector_store")
+        # Updated to point to the new ChromaDB directory
+        print("Initializing RAG pipeline... This may take a moment.")
+        app.state.pipeline = LlamaIndexRAGPipeline(persist_dir="./chroma_db")
+        print("RAG pipeline initialized successfully.")
     except (FileNotFoundError, ConnectionError) as e:
         print(f"FATAL: Could not initialize RAG pipeline: {e}")
         app.state.pipeline = None

@@ -3,10 +3,11 @@ from typing import List, Dict, Any, Optional
 import json
 import urllib.request
 
+import chromadb
 # LlamaIndex components
-from llama_index.core import VectorStoreIndex, StorageContext, load_index_from_storage, Settings, PromptTemplate
+from llama_index.vector_stores.chroma import ChromaVectorStore
+from llama_index.core import VectorStoreIndex, StorageContext, Settings, PromptTemplate
 from llama_index.core.vector_stores import MetadataFilter, MetadataFilters, ExactMatchFilter
-from llama_index.vector_stores.faiss import FaissVectorStore
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 
 # Components for hybrid retrieval and reranking
@@ -16,17 +17,17 @@ from app.components.reranker import Reranker
 class LlamaIndexRAGPipeline:
     """
     Enhanced RAG pipeline using LlamaIndex with optional hybrid retrieval (vector + BM25)
-    and reranking capabilities.
+    and reranking capabilities. Now supports ChromaDB and Dynamic RRF weights.
     
     Features:
-    - LlamaIndex vector retrieval with metadata filtering
+    - LlamaIndex vector retrieval with metadata filtering (ChromaDB)
     - Optional BM25 sparse retrieval for keyword matching
-    - Reciprocal Rank Fusion (RRF) for combining results
+    - Reciprocal Rank Fusion (RRF) with dynamic weighting based on query length
     - Optional reranking using cross-encoder models
     """
     def __init__(
         self, 
-        persist_dir: str = "./vector_store", 
+        persist_dir: str = "./chroma_db", 
         model_name: str = "paraphrase-multilingual-mpnet-base-v2",
         enable_hybrid: bool = True,
         enable_reranking: bool = True,
@@ -45,7 +46,7 @@ class LlamaIndexRAGPipeline:
 
     def _load_resources(self):
         """
-        Loads the index and embedding model from disk, and optionally sets up
+        Loads the index (ChromaDB) and embedding model from disk, and optionally sets up
         BM25 retrieval and reranking components.
         """
         if not self.persist_dir.exists():
@@ -83,11 +84,17 @@ class LlamaIndexRAGPipeline:
                 # 来绕过这个客户端校验。LM Studio 服务端会忽略这个参数，直接使用当前加载的模型。
                 client_model_name = "gpt-3.5-turbo" if "localhost" in self.llm_api_base or "127.0.0.1" in self.llm_api_base else self.llm_model_name
                 
+                # Check for Qwen model to apply specific optimizations
+                # Qwen often requires a different stop token or chat format if not handled by the server
+                is_qwen = "qwen" in self.llm_model_name.lower()
+                
                 Settings.llm = OpenAI(
                     model=client_model_name,
                     api_base=self.llm_api_base,
                     api_key="lm-studio", # Dummy key required by client
-                    temperature=0.7
+                    temperature=0.7,
+                    timeout=120.0, # Increased timeout to 120s for slow local inference
+                    max_retries=1 # Reduce retries to fail faster if truly stuck
                 )
             except ImportError:
                 print("Warning: 'llama-index-llms-openai' not found. LLM generation will be disabled.")
@@ -95,13 +102,16 @@ class LlamaIndexRAGPipeline:
         else:
             Settings.llm = None 
 
-        # Load the index from the FAISS vector store on disk
-        print(f"Loading index from: {self.persist_dir}")
-        vector_store = FaissVectorStore.from_persist_dir(self.persist_dir)
-        storage_context = StorageContext.from_defaults(
-            vector_store=vector_store, persist_dir=self.persist_dir
+        # Load the index from ChromaDB
+        print(f"Loading index from ChromaDB: {self.persist_dir}")
+        db_client = chromadb.PersistentClient(path=str(self.persist_dir))
+        chroma_collection = db_client.get_or_create_collection("rag_collection")
+        vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
+        
+        self.index = VectorStoreIndex.from_vector_store(
+            vector_store,
+            embed_model=Settings.embed_model
         )
-        self.index = load_index_from_storage(storage_context)
         print("--- LlamaIndex vector index loaded successfully ---")
         
         # Load optional components for hybrid retrieval
@@ -186,8 +196,7 @@ class LlamaIndexRAGPipeline:
                     doc = {
                         "text": node.get_content(),
                         "window": window,
-                        "source": metadata.get("source", "N/A"),
-                        "page_number": metadata.get("page_number", None)
+                        "source": metadata.get("source", "N/A")
                     }
                     documents.append(doc)
             
@@ -199,28 +208,28 @@ class LlamaIndexRAGPipeline:
 
     def run(self, query: str, top_k: int = 5, filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """
-        Executes the enhanced RAG pipeline for a given query.
+        执行增强版 RAG 管道查询。
         
-        If hybrid retrieval is enabled:
-        1. Retrieves documents from both dense (vector) and sparse (BM25) retrievers
-        2. Fuses results using Reciprocal Rank Fusion (RRF)
-        3. Optionally re-ranks the fused results
+        如果启用了混合检索：
+        1. 从密集（向量）和稀疏（BM25）检索器检索文档
+        2. 使用倒数排名融合（RRF）融合结果
+        3. 可选地对融合结果进行重排序
         
-        If hybrid retrieval is disabled:
-        - Only uses vector retrieval with optional metadata filtering
+        如果禁用了混合检索：
+        - 仅使用带有可选元数据过滤的向量检索
         
-        Args:
-            query: The semantic query string for vector search.
-            top_k: The number of results to return.
-            filters: A dictionary of metadata filters to apply, e.g., {"authors": "Paolillo"}.
+        参数:
+            query: 用于向量搜索的语义查询字符串。
+            top_k: 返回的结果数量。默认为 5。
+            filters: 要应用的元数据过滤器字典，例如 {"authors": "Paolillo"}。
         """
-        print(f"Running enhanced pipeline for query: '{query}' with top_k={top_k} and filters: {filters}")
+        print(f"正在运行增强管道，查询: '{query}'，top_k={top_k}，过滤器: {filters}")
         
-        # If hybrid retrieval is enabled, use the hybrid approach
+        # 如果启用了混合检索，使用混合方法
         if self.enable_hybrid and self.sparse_retriever:
             return self._run_hybrid(query, top_k, filters)
         else:
-            # Fall back to simple vector retrieval
+            # 回退到简单的向量检索
             return self._run_vector_only(query, top_k, filters)
     
     def _run_vector_only(self, query: str, top_k: int, filters: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -252,17 +261,19 @@ class LlamaIndexRAGPipeline:
         results = []
         for node in nodes_with_scores:
             metadata = node.node.metadata or {}
-            window = metadata.get("window", "")
-
+            
+            # Since we use Recursive Character Splitting, window IS text.
+            # No need to duplicate it in the output structure if they are identical.
+            
             doc = {
                 "text": node.node.get_content(),
-                "window": window,
+                # "window": window, # Removed redundancy
                 "source": metadata.get("source", "N/A"),
-                "page_number": metadata.get("page_number", None),
-                "distance": node.score,
-                "bm25_score": None,
+                "distance": node.score, # In LlamaIndex, this is cosine similarity
+                "bm25_score": 0.0,
                 "rerank_score": None,
-                "is_reranked": False
+                "is_reranked": False,
+                "retrieval_mode": "vector_only"
             }
             results.append(doc)
             
@@ -271,6 +282,7 @@ class LlamaIndexRAGPipeline:
     def _run_hybrid(self, query: str, top_k: int, filters: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Hybrid retrieval: vector + BM25 with RRF fusion and optional reranking.
+        Now supports Dynamic RRF weights based on query length.
         """
         print("Using hybrid retrieval (vector + BM25)...")
         
@@ -287,11 +299,35 @@ class LlamaIndexRAGPipeline:
         sparse_results = self.sparse_retriever.retrieve(query, top_k=retrieval_top_k)
         print(f"Retrieved {len(sparse_results)} BM25 results.")
         
-        # 3. Fuse results using RRF
+        # 3. Fuse results using RRF with Dynamic Weights
         print("Step 3: Fusing results with Reciprocal Rank Fusion...")
-        # Apply weights to favor vector retrieval (index 0) over BM25 (index 1)
-        # Example: Vector weight = 2.0, BM25 weight = 1.0
-        fused_docs = self._fuse_results([dense_results, sparse_results], weights=[2.0, 1.0])
+        
+        # --- Dynamic RRF Logic ---
+        # For Chinese support, we should count characters, not space-separated words.
+        # Simple heuristic: if any Chinese char is present, count chars; otherwise count words.
+        is_chinese = any('\u4e00' <= char <= '\u9fff' for char in query)
+        
+        if is_chinese:
+            query_len = len(query) # Character count for Chinese
+            threshold = 6 # e.g. "Transformer" (11 chars) vs "架构" (2 chars)
+        else:
+            query_len = len(query.split()) # Word count for English
+            threshold = 15
+
+        if query_len < threshold:
+            # Short query: Boost BM25 (Keywords)
+            # Vector: 1.0, BM25: 1.5
+            print(f"Short query detected ({query_len} units). Boosting BM25.")
+            weights = [1.0, 1.5]
+            mode = "hybrid_short_query_boost"
+        else:
+            # Long query: Boost Vector (Semantics)
+            # Vector: 2.0, BM25: 1.0
+            print(f"Long query detected ({query_len} units). Boosting Vector.")
+            weights = [2.0, 1.0]
+            mode = "hybrid_long_query_boost"
+            
+        fused_docs = self._fuse_results([dense_results, sparse_results], weights=weights)
         print(f"Fused to {len(fused_docs)} documents.")
         
         # 4. Optional reranking
@@ -301,12 +337,21 @@ class LlamaIndexRAGPipeline:
             print(f"Step 4: Re-ranking top {len(fused_docs_for_reranking)} documents...")
             reranked_docs = self.reranker.rerank(query, fused_docs_for_reranking, top_n=top_k)
             print("Re-ranking complete.")
-            # Add flag to indicate reranking
+            
+            # Add metadata to indicate reranking details
             for doc in reranked_docs:
                 doc['is_reranked'] = True
+                doc['retrieval_mode'] = mode
+                # Ensure original scores are preserved if available, otherwise 0.0
+                doc['distance'] = doc.get('distance', 0.0) 
+                doc['bm25_score'] = doc.get('bm25_score', 0.0)
+                
             return reranked_docs
         
         # Return top_k from fused results if no reranker
+        for doc in fused_docs:
+             doc['retrieval_mode'] = mode
+             
         return fused_docs[:top_k]
     
     def _retrieve_vector(self, query: str, top_k: int, filters: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -329,15 +374,13 @@ class LlamaIndexRAGPipeline:
         results = []
         for node in nodes_with_scores:
             metadata = node.node.metadata or {}
-            window = metadata.get("window", "")
-
+            
             doc = {
                 "text": node.node.get_content(),
-                "window": window,
+                # "window": window, # Removed
                 "source": metadata.get("source", "N/A"),
-                "page_number": metadata.get("page_number", None),
-                "distance": node.score,
-                "bm25_score": None,
+                "distance": node.score, # This IS the vector score
+                "bm25_score": 0.0, # Placeholder, will be filled if fused
                 "rerank_score": None,
                 "is_reranked": False
             }
@@ -369,11 +412,25 @@ class LlamaIndexRAGPipeline:
             for rank, doc in enumerate(results):
                 # Use a combination of source and text as a unique identifier
                 doc_id = (doc["source"], doc["text"])
+                
                 if doc_id not in rrf_scores:
                     rrf_scores[doc_id] = 0
                     # Create a copy to avoid modifying the original
                     doc_map[doc_id] = doc.copy()
+                    
+                    # Ensure score fields exist and are initialized
+                    if 'distance' not in doc_map[doc_id] or doc_map[doc_id]['distance'] is None:
+                        doc_map[doc_id]['distance'] = 0.0
+                    if 'bm25_score' not in doc_map[doc_id] or doc_map[doc_id]['bm25_score'] is None:
+                        doc_map[doc_id]['bm25_score'] = 0.0
                 
+                # Update specific scores based on source list to preserve original values
+                # List 0 is Vector, List 1 is BM25
+                if i == 0: 
+                    doc_map[doc_id]['distance'] = doc.get('distance', 0.0)
+                elif i == 1:
+                    doc_map[doc_id]['bm25_score'] = doc.get('bm25_score', 0.0)
+
                 # RRF formula: weight * (1 / (k + rank + 1)), where rank is 0-based
                 rrf_scores[doc_id] += weight * (1 / (k + rank + 1))
         
@@ -387,33 +444,61 @@ class LlamaIndexRAGPipeline:
 
     def synthesize(self, query: str, nodes: List[Dict[str, Any]]) -> str:
         """
-        Synthesizes an answer using the LLM based on the retrieved nodes.
+        基于检索到的节点，使用 LLM 综合生成答案。
         """
         if not Settings.llm:
-            return "LLM is not configured. Please ensure LM Studio is running and 'llama-index-llms-openai' is installed."
+            return "未配置 LLM。请确保 LM Studio 正在运行并且已安装 'llama-index-llms-openai'。"
 
-        print(f"Synthesizing answer for query: '{query}' using {len(nodes)} context nodes...")
+        print(f"正在为查询综合答案: '{query}' 使用 {len(nodes)} 个上下文节点...")
         
-        # Construct context string from the 'window' (rich context) of the nodes
-        context_str = "\n\n".join([f"Source: {n['source']}\nContent: {n['window']}" for n in nodes])
+        # 限制总上下文长度以避免小显存 GPU OOM
+        # 如果我们有 5 个 256 tokens 的节点，大约是 1280 tokens。对于 4GB 显存是安全的。
+        # 构造上下文内容字符串
+        context_str = "\n\n".join([f"来源: {n['source']}\n内容: {n['text']}" for n in nodes])
         
-        # Define a simple QA prompt template
+        # 定义一个简化的 QA 提示模板以节省 tokens
         template_str = (
-            "Context information is below.\n"
-            "---------------------\n"
-            "{context_str}\n"
-            "---------------------\n"
-            "Given the context information and not prior knowledge, answer the query.\n"
-            "Query: {query_str}\n"
-            "Answer: "
+            "上下文:\n"
+            "{context_str}\n\n"
+            "问题: {query_str}\n"
+            "请根据上下文回答:"
         )
         prompt_tmpl = PromptTemplate(template_str)
         
-        # Generate response
+        # 生成回答
         try:
             fmt_prompt = prompt_tmpl.format(context_str=context_str, query_str=query)
             response = Settings.llm.complete(fmt_prompt)
             return str(response)
         except Exception as e:
-            print(f"Error calling LLM: {e}")
-            return f"Error generating answer: {e}"
+            print(f"调用 LLM 时出错: {e}")
+            return f"生成答案时出错: {e}"
+
+    def synthesize_stream(self, query: str, nodes: List[Dict[str, Any]]):
+        """
+        synthesize 的流式版本。生成响应块。
+        """
+        if not Settings.llm:
+            yield "未配置 LLM。"
+            return
+
+        context_str = "\n\n".join([f"来源: {n['source']}\n内容: {n['text']}" for n in nodes])
+        
+        # 定义一个简化的 QA 提示模板以节省 tokens
+        template_str = (
+            "上下文:\n"
+            "{context_str}\n\n"
+            "问题: {query_str}\n"
+            "请根据上下文回答:"
+        )
+        prompt_tmpl = PromptTemplate(template_str)
+        
+        try:
+            fmt_prompt = prompt_tmpl.format(context_str=context_str, query_str=query)
+            # 使用 stream_complete
+            response_stream = Settings.llm.stream_complete(fmt_prompt)
+            for chunk in response_stream:
+                yield chunk.delta
+        except Exception as e:
+            print(f"调用 LLM 流式输出时出错: {e}")
+            yield f"错误: {e}"

@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Request, HTTPException
+from fastapi.responses import StreamingResponse
 # APIRouter 用于创建模块化的路由；Request 用于在函数中获取全局应用状态（如我们存好的 pipeline）
 from pydantic import BaseModel
 # 用于定义数据模型，确保用户发送的数据格式是正确的
@@ -8,7 +9,7 @@ from typing import List, Dict, Optional, Any
 # 定义请求体模型。它规定了用户发过来的 JSON 必须长什么样。
 class QueryRequest(BaseModel):
     query: str
-    top_k: int = 5
+    top_k: int = 5 # 恢复为 5，因为切分粒度变小了，需要更多块来覆盖上下文
     filters: Optional[Dict[str, Any]] = None # "filters" 字段是可选的，可以接受任意键值对
 
     class Config:
@@ -24,7 +25,7 @@ class QueryRequest(BaseModel):
 # 定义响应体模型。它规定了系统返回给用户的数据格式。
 class DocumentResponse(BaseModel):
     text: str
-    window: str
+    # window: str # Removed as per pipeline update
     source: str
     page_number: int | None = None
     
@@ -34,6 +35,7 @@ class DocumentResponse(BaseModel):
     rerank_score: float | None = None    # Higher is better. From Reranker.
     
     is_reranked: bool | None = None      # Flag to indicate if the result came from the reranker.
+    retrieval_mode: str | None = None    # "vector_only", "hybrid_short_query_boost", etc.
 
 class ChatResponse(BaseModel):
     query: str
@@ -76,6 +78,7 @@ async def perform_query(request: Request, payload: QueryRequest):
 async def perform_chat(request: Request, payload: QueryRequest):
     """
     Accepts a query, retrieves relevant documents, and uses the local LLM (LM Studio) to generate an answer.
+    Blocking version (may timeout on slow models).
     """
     if not hasattr(request.app.state, 'pipeline') or request.app.state.pipeline is None:
         raise HTTPException(status_code=503, detail="RAG pipeline is not initialized.")
@@ -98,3 +101,36 @@ async def perform_chat(request: Request, payload: QueryRequest):
     except Exception as e:
         print(f"Error during chat processing: {e}")
         raise HTTPException(status_code=500, detail=f"An error occurred during chat processing: {str(e)}")
+
+@router.post("/chat/stream")
+async def perform_chat_stream(request: Request, payload: QueryRequest):
+    """
+    Stream version of /chat. Returns Server-Sent Events (SSE) or raw stream.
+    Useful for slow models like 'thinking' models to avoid timeouts.
+    """
+    if not hasattr(request.app.state, 'pipeline') or request.app.state.pipeline is None:
+        raise HTTPException(status_code=503, detail="RAG pipeline is not initialized.")
+    
+    pipeline = request.app.state.pipeline
+    
+    # 1. Retrieve documents first
+    try:
+        retrieved_docs = pipeline.run(
+            query=payload.query, 
+            top_k=payload.top_k, 
+            filters=payload.filters
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Retrieval failed: {str(e)}")
+
+    # 2. Stream the synthesis
+    async def generate():
+        # Optional: Yield retrieved documents first as a JSON string (custom protocol)
+        # or just yield the text answer. Here we just yield text for simplicity.
+        # If you need docs in frontend, you might need a better protocol (e.g. SSE with event types).
+        
+        # Let's just stream the answer text for now.
+        for chunk in pipeline.synthesize_stream(payload.query, retrieved_docs):
+            yield chunk
+
+    return StreamingResponse(generate(), media_type="text/plain")

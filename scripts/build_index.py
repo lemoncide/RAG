@@ -1,134 +1,154 @@
 import os
 from pathlib import Path
-import faiss
 import shutil
 import json
+import sys
 
 # Add project root to the Python path to allow absolute imports
-import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.components.reader import DocumentReader
-from app.components.preprocessor import SentenceWindowPreprocessor
 from app.components.sparse_retriever import SparseRetriever
 
 # LlamaIndex components
-from llama_index.core import VectorStoreIndex, StorageContext, Settings
-from llama_index.core.schema import TextNode
-from llama_index.vector_stores.faiss import FaissVectorStore
+from llama_index.core import VectorStoreIndex, StorageContext, Settings, Document
+from llama_index.core.node_parser import SentenceSplitter
+from llama_index.vector_stores.chroma import ChromaVectorStore
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-
+import chromadb
 
 def main():
     """
-    Main script to build the LlamaIndex vector index.
+    使用 ChromaDB 和递归字符切分构建 LlamaIndex 向量索引的主脚本。
     
-    1.  Point to the 'data' directory.
-    2.  Read all supported files (PDF, TXT, MD) using DocumentReader.
-    3.  Process them into sentence nodes with metadata using SentenceWindowPreprocessor.
-    4.  Convert custom nodes to LlamaIndex TextNode objects.
-    5.  Setup a FAISS-based VectorStore and a HuggingFace embedding model.
-    6.  Build and persist the index to disk.
+    1.  指向 'data' 目录。
+    2.  使用 DocumentReader 读取所有支持的文件（PDF 转换为 Markdown）。
+    3.  使用 SentenceSplitter（递归字符切分）将它们处理成节点。
+    4.  设置 ChromaDB VectorStore 和 HuggingFace 嵌入模型。
+    5.  构建并将索引持久化到磁盘（ChromaDB 自动处理持久化）。
     """
-    print("--- Starting LlamaIndex Building Process ---")
+    print("--- 开始构建 LlamaIndex 过程 (ChromaDB + 递归切分) ---")
     
-    # 1. Setup paths
+    # 1. 设置路径
     data_dir = Path("./data/embodia/pdf")
-    persist_dir = Path("./vector_store")
+    persist_dir = Path("./chroma_db")
     
-    # Clean up previous storage
+    # 如果需要，清理之前的存储（可选，Chroma 可以追加）
     if persist_dir.exists():
-        print(f"Removing existing storage directory: {persist_dir}")
-        shutil.rmtree(persist_dir)
+        print(f"正在删除现有的存储目录: {persist_dir}")
+        try:
+            shutil.rmtree(persist_dir)
+        except Exception as e:
+            print(f"警告: 无法删除 {persist_dir}: {e}")
         
-    persist_dir.mkdir(parents=True, exist_ok=True)
-
-    if not data_dir.exists() or not any(data_dir.iterdir()):
-        print(f"Error: The '{data_dir}' directory is empty or does not exist.")
-        print("Please add your documents (PDF, TXT, MD) to it and run again.")
-        return
-
-    # 2. Initialize components
-    reader = DocumentReader(input_dir=data_dir)
-    preprocessor = SentenceWindowPreprocessor(window_size=2)
+    # 2. 初始化组件
+    reader = DocumentReader(input_dir=data_dir, timeout=600)
     
-    # Use the same sentence-transformer model for consistency
+    # 使用 SentenceSplitter 进行递归字符切分
+    # 这尊重 chunk_size 并避免来自长 markdown 部分的过大节点
+    # 将切分大小减小到 256，以提高本地推理速度
+    node_parser = SentenceSplitter(chunk_size=256, chunk_overlap=50)
+    
+    # 使用相同的 sentence-transformer 模型以保持一致性
     embed_model = HuggingFaceEmbedding(model_name="paraphrase-multilingual-mpnet-base-v2")
     Settings.embed_model = embed_model
-    Settings.llm = None # We are not using an LLM during indexing
-    Settings.chunk_size = 512 # Set a reasonable chunk size
+    Settings.llm = None # 索引期间我们不使用 LLM
+    Settings.chunk_size = 256 # 设置合理的块大小
     
-    # 3. Read documents and create custom sentence nodes
-    structured_docs = reader.read()
-    if not structured_docs:
-        print("No processable documents found.")
-        return
-        
-    custom_nodes = preprocessor.process(structured_docs)
+    # 3. 读取文档并创建节点
+    print("--- 正在读取和处理文档 ---")
     
-    # 4. Convert custom nodes to LlamaIndex TextNode objects
     llama_nodes = []
-    for node_dict in custom_nodes:
-        # Merge window into metadata to ensure it persists correctly
-        node_metadata = node_dict["metadata"].copy()
-        node_metadata["window"] = node_dict.get("window", "")
-
-        node = TextNode(
-            text=node_dict["text"],
-            metadata=node_metadata
+    bm25_documents = []
+    
+    # 初始化 ChromaDB 客户端
+    print("正在初始化 ChromaDB 客户端...")
+    db_client = chromadb.PersistentClient(path=str(persist_dir))
+    chroma_collection = db_client.get_or_create_collection("rag_collection")
+    vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
+    storage_context = StorageContext.from_defaults(vector_store=vector_store)
+    
+    BATCH_SIZE = 50 # 每次处理 50 个文件
+    current_batch_docs = []
+    
+    doc_generator = reader.read()
+    
+    for doc_dict in doc_generator:
+        # 将字典转换为 LlamaIndex Document 对象
+        # 注意：reader 现在以 Markdown 格式返回全文
+        doc = Document(
+            text=doc_dict["text"],
+            metadata={"source": doc_dict["source"]}
         )
-        llama_nodes.append(node)
+        current_batch_docs.append(doc)
         
+        if len(current_batch_docs) >= BATCH_SIZE:
+            print(f"正在处理 {len(current_batch_docs)} 个文档的批次...")
+            
+            # 使用 SentenceSplitter 解析节点
+            nodes = node_parser.get_nodes_from_documents(current_batch_docs)
+            llama_nodes.extend(nodes)
+            
+            # 准备 BM25 数据
+            for node in nodes:
+                bm25_documents.append({
+                    "text": node.get_content(),
+                    "window": node.get_content(), # 节点现在是切分后的块
+                    "source": node.metadata.get("source", "N/A"),
+                    "page_number": None 
+                })
+            
+            current_batch_docs = [] # 清空批次
+
+    # 处理剩余的文档
+    if current_batch_docs:
+        print(f"正在处理最后的 {len(current_batch_docs)} 个文档批次...")
+        nodes = node_parser.get_nodes_from_documents(current_batch_docs)
+        llama_nodes.extend(nodes)
+        for node in nodes:
+            bm25_documents.append({
+                "text": node.get_content(),
+                "window": node.get_content(),
+                "source": node.metadata.get("source", "N/A"),
+                "page_number": None
+            })
+
     if not llama_nodes:
-        print("No nodes were created after processing. Aborting.")
+        print("处理后未创建任何节点。中止。")
         return
         
-    print(f"Successfully converted {len(llama_nodes)} custom nodes to LlamaIndex TextNodes.")
+    print(f"成功使用 SentenceSplitter 转换了 {len(llama_nodes)} 个节点。")
 
-    # 5. Setup FAISS VectorStore
-    embedding_dim = embed_model.get_text_embedding("test") # Get embedding dim
-    faiss_index = faiss.IndexFlatL2(len(embedding_dim))
-    vector_store = FaissVectorStore(faiss_index=faiss_index)
-    
-    # 6. Build and persist the index
-    print("\n--- Building and Persisting LlamaIndex VectorStoreIndex ---")
-    storage_context = StorageContext.from_defaults(vector_store=vector_store)
+    # 6. 构建并持久化索引
+    print("\n--- 正在构建并持久化 LlamaIndex VectorStoreIndex (ChromaDB) ---")
     
     index = VectorStoreIndex(
         nodes=llama_nodes,
         storage_context=storage_context
     )
     
-    index.storage_context.persist(persist_dir=persist_dir)
+    # ChromaDB 自动持久化，但我们为了其他存储调用 persist 以防万一
+    # index.storage_context.persist(persist_dir=persist_dir) 
+    print(f"索引已构建并持久化到: {persist_dir}")
         
-    # 7. Save documents.json for BM25 Retriever
-    # This avoids the need to reconstruct documents from the vector index at runtime
-    print("\n--- Saving documents.json for BM25 Retriever ---")
+    # 7. 为 BM25 检索器保存 documents.json
+    print("\n--- 正在为 BM25 检索器保存 documents.json ---")
+    # 为了方便，将 documents.json 存储在同一目录中
     documents_json_path = persist_dir / "documents.json"
-    bm25_documents = []
-    for node in custom_nodes:
-        bm25_documents.append({
-            "text": node["text"],
-            "window": node.get("window", ""),
-            "source": node["metadata"].get("source", "N/A"),
-            "page_number": node["metadata"].get("page_number", None)
-        })
     
     with open(documents_json_path, "w", encoding="utf-8") as f:
         json.dump(bm25_documents, f, ensure_ascii=False, indent=2)
-    print(f"Saved {len(bm25_documents)} documents to {documents_json_path}")
+    print(f"已保存 {len(bm25_documents)} 个文档到 {documents_json_path}")
     
-    # 8. Build and Persist BM25 Index (New Step)
-    print("\n--- Building and Persisting BM25 Index ---")
+    # 8. 构建并持久化 BM25 索引
+    print("\n--- 正在构建并持久化 BM25 索引 ---")
     sparse_retriever = SparseRetriever()
     sparse_retriever.build_index(bm25_documents)
     bm25_index_path = persist_dir / "bm25_index.pkl"
     sparse_retriever.save_index(bm25_index_path)
 
-    print("\n--- Index Building Complete! ---")
-    print(f"LlamaIndex with FAISS store persisted to: {persist_dir}")
-    print("You can now start the FastAPI application.")
-
+    print("\n--- 索引构建完成！---")
+    print(f"LlamaIndex (ChromaDB 存储) 已持久化到: {persist_dir}")
 
 if __name__ == "__main__":
     main()
