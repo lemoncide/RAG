@@ -1,76 +1,78 @@
-import faiss
-from sentence_transformers import SentenceTransformer
-from typing import List, Dict
-import numpy as np
+import chromadb
+from pathlib import Path
+from typing import List, Dict, Any, Optional
+from llama_index.vector_stores.chroma import ChromaVectorStore
+from llama_index.core import VectorStoreIndex, Settings
+from llama_index.core.vector_stores import MetadataFilters, ExactMatchFilter
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 
-#将文字变成向量，并负责快速找到最相关的内容。
-class DenseRetriever:
+class LlamaIndexRetriever:
     """
-    A component for creating and querying a dense vector index using FAISS.
-    
-    This class handles embedding creation and similarity search, getting inspiration
-    from 'rag-from-scratch' for understanding the core mechanics.
+    基于 LlamaIndex 和 ChromaDB 的向量检索器。
+    负责加载持久化索引并执行语义检索。
     """
-    def __init__(self, model_name: str = 'paraphrase-multilingual-mpnet-base-v2'):
-        print("Initializing SentenceTransformer model...")
-        self.model = SentenceTransformer(model_name)
+    def __init__(self, persist_dir: str, model_name: str):
+        self.persist_dir = Path(persist_dir)
+        self.model_name = model_name
         self.index = None
-        self.documents = []
-        print("Model initialized.")
+        self._load_index()
 
-    def build_index(self, documents: List[Dict[str, str]]):
-        """
-        Creates a FAISS index from a list of document chunks.
-        
-        Args:
-            documents: A list of dictionaries, each with a "text" key.
-        """
-        self.documents = documents
-        texts = [doc["text"] for doc in self.documents]
-        
-        print(f"Embedding {len(texts)} text chunks...")
-        embeddings = self.model.encode(texts, convert_to_tensor=False, show_progress_bar=True)
-        
-        embedding_dim = embeddings.shape[1]
-        print(f"Embeddings created with dimension: {embedding_dim}")
-        
-        print("Building FAISS index...")
-        self.index = faiss.IndexFlatL2(embedding_dim) # 创建基于欧式距离（L2）的索引
-        self.index.add(np.array(embeddings, dtype=np.float32))
-        print(f"FAISS index built. Total vectors in index: {self.index.ntotal}")
+    def _load_index(self):
+        """加载 ChromaDB 索引和 Embedding 模型"""
+        if not self.persist_dir.exists():
+            raise FileNotFoundError(f"未找到存储目录 '{self.persist_dir}'")
 
-    def retrieve(self, query: str, top_k: int = 5) -> List[Dict[str, str]]:
-        """
-        Searches the index for the most relevant document chunks for a given query.
-        """
-        if self.index is None:
-            raise RuntimeError("Index is not built. Please call 'build_index' first.")
-            
-        print(f"Retrieving top {top_k} documents for query: '{query}'")
-        query_embedding = self.model.encode([query]) # 用户的提问用同一个模型转化成query_embedding
+        print(f"正在初始化向量检索器 (Model: {self.model_name})...")
         
-        distances, indices = self.index.search(np.array(query_embedding, dtype=np.float32), top_k)
+        # 1. 设置 Embedding 模型
+        # 注意：这里设置全局 Settings，虽然不是最优雅的，但在 LlamaIndex 中是常规做法
+        Settings.embed_model = HuggingFaceEmbedding(model_name=self.model_name)
+        
+        # 2. 连接 ChromaDB
+        db_client = chromadb.PersistentClient(path=str(self.persist_dir))
+        chroma_collection = db_client.get_or_create_collection("rag_collection")
+        vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
+        
+        # 3. 加载索引
+        self.index = VectorStoreIndex.from_vector_store(
+            vector_store,
+            embed_model=Settings.embed_model
+        )
+        print("向量检索器加载成功。")
 
+    def retrieve(self, query: str, top_k: int = 5, filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        """
+        执行向量检索。
+        """
+        print(f"正在执行向量检索: '{query}' (top_k={top_k})")
+        
+        retriever = self.index.as_retriever(similarity_top_k=top_k)
+        
+        # 应用元数据过滤器
+        if filters:
+            filter_objects = [
+                ExactMatchFilter(key=key, value=value) 
+                for key, value in filters.items()
+                if isinstance(value, (str, int, float, list))
+            ]
+            if filter_objects:
+                retriever.filters = MetadataFilters(filters=filter_objects)
+                print(f"  应用过滤器: {filter_objects}")
+
+        nodes_with_scores = retriever.retrieve(query)
+        
+        # 格式化结果
         results = []
-        if indices is not None and len(indices) > 0:
-            # 过滤掉无效的索引（-1是FAISS在找不到邻居时返回的值）
-            # 并创建一个包含文档和其距离的字典列表
-            for i, dist in zip(indices[0], distances[0]):
-                if i != -1:
-                    doc = self.documents[i].copy()  # 使用 .copy() 避免修改原始文档
-                    doc['distance'] = float(dist)
-                    results.append(doc)
-        
-        # FAISS返回的结果已经按距离排序，所以我们不需要重新排序
+        for node in nodes_with_scores:
+            metadata = node.node.metadata or {}
+            doc = {
+                "text": node.node.get_content(),
+                "source": metadata.get("source", "N/A"),
+                "window": metadata.get("window", ""), # 如果有窗口信息也带上
+                "distance": node.score, # LlamaIndex 中这是相似度分数
+                "retrieval_mode": "vector"
+            }
+            results.append(doc)
+            
+        print(f"  检索到 {len(results)} 个向量结果。")
         return results
-
-    def save_index(self, file_path: str):
-        """Saves the FAISS index to a file."""
-        print(f"Saving FAISS index to {file_path}")
-        faiss.write_index(self.index, file_path)
-
-    def load_index(self, file_path: str):
-        """Loads a FAISS index from a file."""
-        print(f"Loading FAISS index from {file_path}")
-        self.index = faiss.read_index(file_path)
-        print(f"Index loaded. Total vectors: {self.index.ntotal}")

@@ -9,14 +9,14 @@ from typing import List, Dict, Optional, Any
 # 定义请求体模型。它规定了用户发过来的 JSON 必须长什么样。
 class QueryRequest(BaseModel):
     query: str
-    top_k: int = 3 # 默认为 3，平衡上下文长度和推理速度
+    top_k: int = 5 # 默认为 5，平衡上下文长度和推理速度
     filters: Optional[Dict[str, Any]] = None # "filters" 字段是可选的，可以接受任意键值对
 
     class Config:
         json_schema_extra = {
             "example": {
                 "query": "机器人驾驶车辆竞赛",
-                "top_k": 3,
+                "top_k": 5,
                 "filters": {}
             }
         }
@@ -25,7 +25,7 @@ class QueryRequest(BaseModel):
 # 定义响应体模型。它规定了系统返回给用户的数据格式。
 class DocumentResponse(BaseModel):
     text: str
-    # window: str # Removed as per pipeline update
+    window: str | None = None # 上下文窗口，可能为空
     source: str
     page_number: int | None = None
     

@@ -16,7 +16,7 @@ with st.sidebar:
     api_url = st.text_input("API URL", value="http://127.0.0.1:8000/api/chat/stream")
     
     # 检索参数
-    top_k = st.slider("Top K (检索数量)", min_value=1, max_value=10, value=3)
+    top_k = st.slider("Top K (检索数量)", min_value=1, max_value=10, value=5)
     
     st.divider()
     st.markdown("### 关于")
@@ -40,6 +40,29 @@ if prompt := st.chat_input("请输入你的问题..."):
 
     # 2. 调用 API 并显示回复
     with st.chat_message("assistant"):
+        # 2.1 检索阶段 (调用 /query 接口获取检索结果)
+        with st.expander("🔍 查看检索到的上下文 (Debug)", expanded=False):
+            try:
+                query_url = api_url.replace("/chat/stream", "/query").replace("/chat", "/query")
+                q_payload = {"query": prompt, "top_k": top_k}
+                q_response = requests.post(query_url, json=q_payload)
+                
+                if q_response.status_code == 200:
+                    docs = q_response.json()
+                    for i, doc in enumerate(docs):
+                        st.markdown(f"**Document {i+1}** (Score: {doc.get('distance', 0):.4f})")
+                        st.text(f"Source: {doc.get('source', 'N/A')}")
+                        st.markdown(f"**Matched Text:** {doc.get('text', '')}")
+                        if doc.get('window'):
+                            st.caption("Context Window (完整上下文):")
+                            st.info(doc.get('window'))
+                        st.divider()
+                else:
+                    st.warning("无法获取检索详情")
+            except Exception as e:
+                st.warning(f"无法连接检索接口: {e}")
+
+        # 2.2 生成阶段
         message_placeholder = st.empty()
         full_response = ""
         

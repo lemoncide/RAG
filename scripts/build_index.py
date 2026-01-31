@@ -12,22 +12,21 @@ from app.components.sparse_retriever import SparseRetriever
 
 # LlamaIndex components
 from llama_index.core import VectorStoreIndex, StorageContext, Settings, Document
-from llama_index.core.node_parser import SentenceSplitter
 from llama_index.vector_stores.chroma import ChromaVectorStore
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 import chromadb
+from app.components.preprocessor import LlamaIndexPreprocessor
 
 def main():
     """
-    使用 ChromaDB 和递归字符切分构建 LlamaIndex 向量索引的主脚本。
+    使用 ChromaDB 构建 LlamaIndex 向量索引的主脚本。
     
-    1.  指向 'data' 目录。
-    2.  使用 DocumentReader 读取所有支持的文件（PDF 转换为 Markdown）。
-    3.  使用 SentenceSplitter（递归字符切分）将它们处理成节点。
-    4.  设置 ChromaDB VectorStore 和 HuggingFace 嵌入模型。
-    5.  构建并将索引持久化到磁盘（ChromaDB 自动处理持久化）。
+    流程简化：
+    1. Reader: 读取 PDF 为 Markdown 字典。
+    2. Preprocessor: 清洗 -> Markdown切分 -> 句子窗口切分。
+    3. Indexing: 存入 ChromaDB。
     """
-    print("--- 开始构建 LlamaIndex 过程 (ChromaDB + 递归切分) ---")
+    print("--- 开始构建 LlamaIndex 过程 (ChromaDB + 分层切分) ---")
     
     # 1. 设置路径
     data_dir = Path("./data/embodia/pdf")
@@ -43,17 +42,12 @@ def main():
         
     # 2. 初始化组件
     reader = DocumentReader(input_dir=data_dir, timeout=600)
-    
-    # 使用 SentenceSplitter 进行递归字符切分
-    # 这尊重 chunk_size 并避免来自长 markdown 部分的过大节点
-    # 将切分大小减小到 256，以提高本地推理速度
-    node_parser = SentenceSplitter(chunk_size=256, chunk_overlap=50)
+    preprocessor = LlamaIndexPreprocessor(window_size=3)
     
     # 使用相同的 sentence-transformer 模型以保持一致性
     embed_model = HuggingFaceEmbedding(model_name="paraphrase-multilingual-mpnet-base-v2")
     Settings.embed_model = embed_model
     Settings.llm = None # 索引期间我们不使用 LLM
-    Settings.chunk_size = 256 # 设置合理的块大小
     
     # 3. 读取文档并创建节点
     print("--- 正在读取和处理文档 ---")
@@ -68,56 +62,38 @@ def main():
     vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
     storage_context = StorageContext.from_defaults(vector_store=vector_store)
     
-    BATCH_SIZE = 50 # 每次处理 50 个文件
-    current_batch_docs = []
-    
+    # 一次性读取所有文档（如果内存足够），或者分批处理
+    # 这里为了简单，我们收集所有 raw docs 然后交给 preprocessor 处理
+    raw_docs = []
     doc_generator = reader.read()
     
     for doc_dict in doc_generator:
-        # 将字典转换为 LlamaIndex Document 对象
-        # 注意：reader 现在以 Markdown 格式返回全文
-        doc = Document(
-            text=doc_dict["text"],
-            metadata={"source": doc_dict["source"]}
-        )
-        current_batch_docs.append(doc)
+        raw_docs.append(doc_dict)
         
-        if len(current_batch_docs) >= BATCH_SIZE:
-            print(f"正在处理 {len(current_batch_docs)} 个文档的批次...")
-            
-            # 使用 SentenceSplitter 解析节点
-            nodes = node_parser.get_nodes_from_documents(current_batch_docs)
-            llama_nodes.extend(nodes)
-            
-            # 准备 BM25 数据
-            for node in nodes:
-                bm25_documents.append({
-                    "text": node.get_content(),
-                    "window": node.get_content(), # 节点现在是切分后的块
-                    "source": node.metadata.get("source", "N/A"),
-                    "page_number": None 
-                })
-            
-            current_batch_docs = [] # 清空批次
+    if not raw_docs:
+        print("未读取到任何文档。中止。")
+        return
 
-    # 处理剩余的文档
-    if current_batch_docs:
-        print(f"正在处理最后的 {len(current_batch_docs)} 个文档批次...")
-        nodes = node_parser.get_nodes_from_documents(current_batch_docs)
-        llama_nodes.extend(nodes)
-        for node in nodes:
-            bm25_documents.append({
-                "text": node.get_content(),
-                "window": node.get_content(),
-                "source": node.metadata.get("source", "N/A"),
-                "page_number": None
-            })
+    # 4. 使用 Preprocessor 处理
+    # 这步完成了 Cleaning, Markdown Splitting, Sentence Window Splitting
+    llama_nodes = preprocessor.process(raw_docs)
 
     if not llama_nodes:
         print("处理后未创建任何节点。中止。")
         return
         
-    print(f"成功使用 SentenceSplitter 转换了 {len(llama_nodes)} 个节点。")
+    print(f"成功转换了 {len(llama_nodes)} 个节点 (分层切分)。")
+
+    # 5. 准备 BM25 数据
+    print("正在准备 BM25 数据...")
+    for node in llama_nodes:
+        window_text = node.metadata.get("window", node.get_content())
+        bm25_documents.append({
+            "text": node.get_content(), # 索引时用单句
+            "window": window_text,      # BM25 也存窗口，方便检索
+            "source": node.metadata.get("source", "N/A"),
+            "page_number": None 
+        })
 
     # 6. 构建并持久化索引
     print("\n--- 正在构建并持久化 LlamaIndex VectorStoreIndex (ChromaDB) ---")
@@ -127,13 +103,10 @@ def main():
         storage_context=storage_context
     )
     
-    # ChromaDB 自动持久化，但我们为了其他存储调用 persist 以防万一
-    # index.storage_context.persist(persist_dir=persist_dir) 
     print(f"索引已构建并持久化到: {persist_dir}")
         
     # 7. 为 BM25 检索器保存 documents.json
     print("\n--- 正在为 BM25 检索器保存 documents.json ---")
-    # 为了方便，将 documents.json 存储在同一目录中
     documents_json_path = persist_dir / "documents.json"
     
     with open(documents_json_path, "w", encoding="utf-8") as f:
