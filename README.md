@@ -107,3 +107,6 @@ streamlit run streamlit_app.py
 *   **流式对话**: `POST /api/chat/stream` 
 *   **普通对话**: `POST /api/chat`
 *   **纯检索**: `POST /api/query` (只返回文档，不生成回答)
+
+## 视频演示
+https://github.com/user-attachments/assets/7f1a9c46-0455-47ef-b8a7-f11ff10c4320
